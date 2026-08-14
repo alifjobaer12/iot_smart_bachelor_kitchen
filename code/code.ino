@@ -1,5 +1,5 @@
 #include <WiFi.h>
-#include <WiFiClientSecure.h> // REQUIRED FOR HTTPS (VERCEL)
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
@@ -17,8 +17,8 @@
 #define TFT_DC    2
 #define TFT_RST   15
 
-#define BTN_PAGE  34 // REQUIRES PHYSICAL 10k PULL-DOWN RESISTOR TO GND
-#define BTN_COOK  35 // REQUIRES PHYSICAL 10k PULL-DOWN RESISTOR TO GND
+#define BTN_PAGE  34 
+#define BTN_COOK  35 
 
 #define PIR_PIN   36
 #define FLAME_PIN 39
@@ -56,8 +56,11 @@ TaskHandle_t TaskUI;
 SemaphoreHandle_t dataMutex;
 
 // ==========================================
-// SHARED VARIABLES (Protected by Mutex)
+// AUTH & SHARED VARIABLES
 // ==========================================
+String firebaseIdToken = "";
+unsigned long tokenAuthTime = 0;
+
 float sharedTemp = 0.0;
 float sharedHum = 0.0;
 int sharedGas = 0;
@@ -71,7 +74,7 @@ int bfastCount = 0, lunchCount = 0, dinnerCount = 0, totalCount = 0;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n--- ESP32 Smart Project Starting ---");
+  Serial.println("\n--- ESP32 Smart Project Starting (Firebase Auth) ---");
 
   dataMutex = xSemaphoreCreateMutex();
 
@@ -83,9 +86,6 @@ void setup() {
 }
 
 void loop() {
-  // ==========================================
-  // CORE 1: HARDWARE LOGIC 
-  // ==========================================
   unsigned long currentMillis = millis();
   static unsigned long lastMotionTime = 0;
   static unsigned long lastSerialPrint = 0;
@@ -103,14 +103,18 @@ void loop() {
   bool emergencyState = (gasLeak || fire);
 
   if (currentMillis - lastSerialPrint >= 2000) {
-    Serial.printf("[Core 1] Temp: %.1fC | Hum: %.1f%% | Gas: %d | Fire: %d | Tap Dist: %dcm | Bin Dist: %dcm\n", 
-                  t, h, g, fire, distTap, distBin);
+    Serial.printf("[Core 1] Temp: %.1fC | Hum: %.1f%% | Gas: %d | Fire: %d\n", t, h, g, fire);
     lastSerialPrint = currentMillis;
   }
 
   if (emergencyState != lastEmergencyState) {
-    if (emergencyState) Serial.println("\n[Core 1] >>> EMERGENCY TRIGGERED! <<<");
-    else Serial.println("\n[Core 1] >>> EMERGENCY CLEARED. <<<");
+    if (emergencyState) {
+      Serial.println("\n[Core 1] >>> EMERGENCY TRIGGERED! <<<");
+      postWarningFirebase(true, fire ? "Fire Detected" : "Gas Leak Detected");
+    } else {
+      Serial.println("\n[Core 1] >>> EMERGENCY CLEARED. <<<");
+      postWarningFirebase(false, "Normal");
+    }
     lastEmergencyState = emergencyState;
   }
 
@@ -122,7 +126,6 @@ void loop() {
     xSemaphoreGive(dataMutex);
   }
 
-  // Actuators
   bool handDetected = (distTap < DISTANCE_THRESHOLD);
   digitalWrite(RELAY_TAP, (handDetected || fire) ? HIGH : LOW);
   servoBin.write((distBin < DISTANCE_THRESHOLD) ? 90 : 0);
@@ -159,56 +162,51 @@ void TaskUI_Network(void * pvParameters) {
   tft.setTextSize(2);
   tft.print("Connecting to Wi-Fi...");
   
-  Serial.print("[Core 0] Connecting to Wi-Fi...");
   WiFi.begin(ssid, password);
 
-  // Try connecting for up to 10 seconds (20 * 500ms)
   int connTimeout = 0;
   while (WiFi.status() != WL_CONNECTED && connTimeout < 20) {
-    Serial.print(".");
     vTaskDelay(500 / portTICK_PERIOD_MS);
     connTimeout++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[Core 0] Wi-Fi Connected! IP: " + WiFi.localIP().toString());
     configTime(21600, 0, "pool.ntp.org", "time.nist.gov"); 
-    fetchMealsAPI(); 
-  } else {
-    Serial.println("\n[Core 0] Wi-Fi Connection Failed! Moving forward offline.");
+    
+    // Authenticate with Firebase on startup
+    if (loginFirebase()) {
+      fetchMealsFirebase();
+    }
   }
   
-  tft.fillScreen(ST77XX_BLACK); // Clear startup text
+  tft.fillScreen(ST77XX_BLACK); 
 
   unsigned long lastApiTime = 0;
-  
-  // Software Debounce Trackers
   bool lastBtnPage = LOW;
   bool lastBtnCook = LOW;
   unsigned long debouncePageTimer = 0;
   unsigned long debounceCookTimer = 0;
 
   for(;;) { 
-    // Check Wi-Fi background reconnection if disconnected
     if (WiFi.status() != WL_CONNECTED) {
-      WiFi.begin(ssid, password); // Non-blocking background attempt can go here or keep status check
+      WiFi.begin(ssid, password);
+    } else if (firebaseIdToken == "" || (millis() - tokenAuthTime > 3000000)) {
+      // Refresh token if empty or approaching 1 hour expiry (50 mins = 3000000ms)
+      loginFirebase();
     }
 
     bool btnPage = digitalRead(BTN_PAGE);
     bool btnCook = digitalRead(BTN_COOK);
 
-    // Debounce Logic 
     if (btnPage == HIGH && lastBtnPage == LOW && (millis() - debouncePageTimer > 300)) {
       currentPage = (currentPage == 0) ? 1 : 0;
-      Serial.printf("[Core 0] Page Button Pressed! Switched to Page %d\n", currentPage);
       tft.fillScreen(ST77XX_BLACK);
       debouncePageTimer = millis();
     }
     lastBtnPage = btnPage;
 
     if (btnCook == HIGH && lastBtnCook == LOW && (millis() - debounceCookTimer > 1000)) {
-      Serial.println("[Core 0] Cook Button Pressed! Triggering POST API.");
-      postCookingAPI();
+      postCookingFirebase();
       debounceCookTimer = millis();
     }
     lastBtnCook = btnCook;
@@ -239,10 +237,10 @@ void TaskUI_Network(void * pvParameters) {
       else drawSensorPage(cT, cH, cG);
     }
 
-    // Periodic API Posting & Fetching (Only if connected)
+    // Sync with Firebase every 1 minute
     if (WiFi.status() == WL_CONNECTED && (millis() - lastApiTime > 60000)) {
-      postSensorsAPI(cT, cH, cG);
-      fetchMealsAPI();
+      postSensorsFirebase(cT, cH, cG);
+      fetchMealsFirebase();
       lastApiTime = millis();
     }
 
@@ -254,10 +252,8 @@ void TaskUI_Network(void * pvParameters) {
 // UI DRAWING FUNCTIONS
 // ==========================================
 void drawWifiStatusIcon() {
-  // Top right corner indicator area (around X: 270 to 310, Y: 2)
   tft.fillRect(260, 2, 55, 18, ST77XX_BLACK); 
-  
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED && firebaseIdToken != "") {
     tft.setTextColor(ST77XX_GREEN);
     tft.setTextSize(1);
     tft.setCursor(265, 5);
@@ -266,7 +262,7 @@ void drawWifiStatusIcon() {
     tft.setTextColor(ST77XX_RED);
     tft.setTextSize(1);
     tft.setCursor(260, 5);
-    tft.print("NO WIFI");
+    tft.print("NO AUTH");
   }
 }
 
@@ -277,7 +273,7 @@ void drawTimeDate() {
     strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
     strftime(dateStr, sizeof(dateStr), "%d/%m/%y", &timeinfo);
 
-    tft.fillRect(0, 0, 255, 20, ST77XX_BLACK); // Clear top bar text area (leaving space for wifi icon)
+    tft.fillRect(0, 0, 255, 20, ST77XX_BLACK); 
     tft.setTextColor(ST77XX_YELLOW);
     tft.setTextSize(2);
     tft.setCursor(10, 5); tft.print(dateStr);
@@ -288,8 +284,6 @@ void drawTimeDate() {
     tft.setTextSize(1);
     tft.setCursor(10, 5); tft.print("Time Syncing...");
   }
-  
-  // Always update Wi-Fi status symbol on the top bar
   drawWifiStatusIcon();
 }
 
@@ -348,21 +342,53 @@ void drawWarningPage() {
 }
 
 // ==========================================
-// API FUNCTIONS (UPDATED FOR HTTPS)
+// FIREBASE AUTH & REST API FUNCTIONS
 // ==========================================
-void fetchMealsAPI() {
+
+// Authenticate ESP32 with Firebase Auth Identity Toolkit
+bool loginFirebase() {
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client;
-    client.setInsecure(); // Bypass SSL verification for ESP32
+    client.setInsecure();
+    HTTPClient http;
+
+    String authUrl = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + String(firebaseApiKey);
+    http.begin(client, authUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonPayload = "{\"email\":\"" + String(firebaseUserEmail) + "\",\"password\":\"" + String(firebaseUserPassword) + "\",\"returnSecureToken\":true}";
+    int httpCode = http.POST(jsonPayload);
+
+    if (httpCode == 200) {
+      String response = http.getString();
+      DynamicJsonDocument doc(2048);
+      deserializeJson(doc, response);
+
+      firebaseIdToken = doc["idToken"].as<String>();
+      tokenAuthTime = millis();
+      Serial.println("[Firebase] Auth Successful!");
+      http.end();
+      return true;
+    } else {
+      Serial.printf("[Firebase] Auth Failed! Code: %d\n", httpCode);
+    }
+    http.end();
+  }
+  return false;
+}
+
+void fetchMealsFirebase() {
+  if (WiFi.status() == WL_CONNECTED && firebaseIdToken != "") {
+    WiFiClientSecure client;
+    client.setInsecure(); 
     HTTPClient http;
     
-    http.begin(client, apiGetMeals);
+    String url = String(firebaseHost) + "/meal.json?auth=" + firebaseIdToken;
+    http.begin(client, url);
     int httpCode = http.GET();
     
-    if (httpCode > 0) {
+    if (httpCode == 200) {
       String payload = http.getString();
-      Serial.printf("[API] GET Success (Code: %d)\n", httpCode);
-      
       DynamicJsonDocument doc(1024);
       deserializeJson(doc, payload);
       
@@ -373,51 +399,62 @@ void fetchMealsAPI() {
       bfastMenu = doc["bfast_menu"] | "-";
       lunchMenu = doc["lunch_menu"] | "-";
       dinnerMenu = doc["dinner_menu"] | "-";
-    } else {
-      Serial.printf("[API] GET Failed, Error: %s\n", http.errorToString(httpCode).c_str());
     }
     http.end();
   }
 }
 
-void postSensorsAPI(float t, float h, int g) {
-  if (WiFi.status() == WL_CONNECTED) {
+void postSensorsFirebase(float t, float h, int g) {
+  if (WiFi.status() == WL_CONNECTED && firebaseIdToken != "") {
     WiFiClientSecure client;
     client.setInsecure(); 
     HTTPClient http;
     
-    http.begin(client, apiPostSensors);
+    String url = String(firebaseHost) + "/sensors.json?auth=" + firebaseIdToken;
+    http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
     
     String jsonBody = "{\"temp\":" + String(t) + ",\"humidity\":" + String(h) + ",\"gas\":" + String(g) + "}";
-    int httpResponseCode = http.POST(jsonBody);
-    Serial.printf("[API] POST Sensors Response Code: %d\n", httpResponseCode);
-    
+    http.PUT(jsonBody);
     http.end();
   }
 }
 
-void postCookingAPI() {
-  if (WiFi.status() == WL_CONNECTED) {
+void postCookingFirebase() {
+  if (WiFi.status() == WL_CONNECTED && firebaseIdToken != "") {
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
     
-    http.begin(client, apiPostCooking);
+    String url = String(firebaseHost) + "/kitchen.json?auth=" + firebaseIdToken;
+    http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
     
-    int httpResponseCode = http.POST("{\"status\":\"cooking_done\"}");
-    Serial.printf("[API] POST Cooking Response Code: %d\n", httpResponseCode);
-    
+    http.PUT("{\"status\":\"cooking_done\"}");
     http.end();
     
-    // Quick UI feedback
     tft.fillRect(0, 220, 320, 20, ST77XX_BLACK);
     tft.setCursor(50, 220);
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_GREEN);
     tft.print("Cooking Done Message Sent!");
     delay(1000); 
+  }
+}
+
+void postWarningFirebase(bool state, String message) {
+  if (WiFi.status() == WL_CONNECTED && firebaseIdToken != "") {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    
+    String url = String(firebaseHost) + "/warning.json?auth=" + firebaseIdToken;
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    
+    String jsonBody = "{\"active\":" + String(state ? "true" : "false") + ",\"message\":\"" + message + "\"}";
+    http.PUT(jsonBody);
+    http.end();
   }
 }
 
@@ -442,7 +479,6 @@ void initHardware() {
   pinMode(LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  // Allocate hardware timers for ESP32 servos
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
