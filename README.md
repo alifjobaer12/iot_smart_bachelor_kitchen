@@ -1,67 +1,81 @@
 # ESP32 Smart Kitchen IoT System
 
-An ESP32-based smart kitchen prototype that combines environmental monitoring, safety automation, touchless appliances, meal information, and cloud communication in one system.
+An ESP32-based smart kitchen prototype that combines environmental monitoring, safety automation, touchless appliances, a TFT user interface, and authenticated Firebase cloud synchronization.
 
-The firmware reads temperature, humidity, gas, flame, motion, and distance sensors; controls relays, lights, a buzzer, and two servos; displays live information on an ST7789 TFT; and communicates with a web backend over Wi-Fi.
+The firmware reads temperature, humidity, gas, flame, motion, and distance sensors. It controls relays, lighting, a buzzer, and two servo motors. Meal information and device status are exchanged with Firebase Realtime Database after the ESP32 signs in with Firebase Authentication.
 
 > [!IMPORTANT]
-> This repository contains prototype firmware, not a certified fire, gas, or life-safety system. Do not rely on it as the only protection against fire, gas leaks, or other hazards.
+> This is a prototype, not a certified fire, gas, or life-safety system. Do not use it as the only protection against fire, gas leaks, or other hazards.
+
+> [!CAUTION]
+> Never commit `code/secrets.h`. Before publishing the repository, also verify that `code/secrets.example.h` contains placeholders only. Wi-Fi passwords, Firebase user passwords, and other real credentials must not appear in tracked files or Git history.
 
 ## Table of contents
 
-- [Main features](#main-features)
-- [How the system works](#how-the-system-works)
+- [Features](#features)
+- [System architecture](#system-architecture)
 - [Hardware requirements](#hardware-requirements)
 - [Complete wiring](#complete-wiring)
 - [Power and electrical safety](#power-and-electrical-safety)
 - [Software requirements](#software-requirements)
+- [Firebase setup](#firebase-setup)
 - [Installation and upload](#installation-and-upload)
 - [Configuration](#configuration)
 - [Display and controls](#display-and-controls)
 - [Automation rules](#automation-rules)
-- [Backend API contract](#backend-api-contract)
+- [Firebase data model](#firebase-data-model)
+- [Cloud synchronization behavior](#cloud-synchronization-behavior)
 - [Project structure](#project-structure)
 - [Serial monitoring](#serial-monitoring)
 - [Troubleshooting](#troubleshooting)
 - [Known limitations and security notes](#known-limitations-and-security-notes)
 
-## Main features
+## Features
 
-- Displays meal menus and meal counts for breakfast, lunch, and dinner.
-- Displays live temperature, humidity, and gas readings.
-- Fetches network time using NTP and shows Dhaka time (UTC+6).
-- Shows the current Wi-Fi connection status.
+- Authenticates a dedicated ESP32 user with Firebase Email/Password Authentication.
+- Reads meal menus and counts from Firebase Realtime Database.
+- Uploads temperature, humidity, and raw MQ-2 gas readings every minute.
+- Uploads emergency state changes to Firebase.
+- Sends a `cooking_done` status when the cooking button is pressed.
+- Refreshes Firebase authentication by signing in again approximately every 50 minutes.
+- Shows meal information or live sensor values on an ST7789 TFT display.
+- Fetches time using NTP and displays Bangladesh time (UTC+6).
 - Detects flame and high gas readings as emergency conditions.
-- Activates an alarm buzzer and emergency servo during an emergency.
-- Turns on the exhaust fan when the temperature is high or gas is detected.
-- Activates a water-pump relay when a hand is near the tap or flame is detected.
-- Opens a touchless dustbin using an ultrasonic sensor and servo.
-- Turns on a light when motion is detected and turns it off after one minute without motion.
-- Sends sensor readings to a backend every 60 seconds.
-- Lets a user send a `cooking_done` event with a physical button.
-- Continues its local hardware automation if Wi-Fi is unavailable.
+- Activates a buzzer, emergency servo, warning screen, and other safety outputs.
+- Controls a touchless tap and touchless dustbin with ultrasonic sensors.
+- Controls a light using PIR motion detection.
+- Continues local sensor and actuator behavior when cloud access is unavailable.
 
-## How the system works
+## System architecture
 
-The firmware divides work between the ESP32's two processor cores:
+The firmware divides its work between the ESP32's two processor cores.
 
-| Execution context | Responsibility |
+| Execution context | Main responsibilities |
 | --- | --- |
-| Core 1 (`loop`) | Reads sensors, evaluates safety conditions, drives relays, servos, the light, and the buzzer, and prints readings to Serial. |
-| Core 0 (`TaskUI_Network`) | Manages Wi-Fi, NTP time, the TFT interface, button input, and backend API requests. |
+| Core 1 (`loop`) | Reads sensors, evaluates automation and emergency conditions, controls actuators, logs readings, and sends warning state changes to Firebase. |
+| Core 0 (`TaskUI_Network`) | Manages Wi-Fi, Firebase login, token renewal, NTP time, the TFT interface, buttons, meal downloads, and periodic sensor uploads. |
 
-Sensor values shared between the two cores are protected by a FreeRTOS mutex. This prevents the display/network task from reading temperature, humidity, gas, or emergency state while the hardware loop is updating them.
+Temperature, humidity, gas, and emergency state are shared between the two tasks through variables protected by a FreeRTOS mutex.
 
-Normal display pages are overridden by a red warning screen whenever the flame sensor or gas logic reports an emergency. Once the emergency clears, the firmware returns to the previously selected normal page.
+### Cloud flow
+
+1. The ESP32 connects to Wi-Fi, waiting up to approximately 10 seconds during startup.
+2. It sends the configured Firebase email and password to Google Identity Toolkit.
+3. A successful login returns a Firebase ID token.
+4. The token is added to Realtime Database REST requests as `?auth=<ID_TOKEN>`.
+5. The firmware signs in again when the token is missing or about 50 minutes old.
+6. Meals are read from `/meal`; sensor, kitchen, and warning states are written to their corresponding database paths.
+
+Local automation does not require Firebase. Cloud reads and writes require both Wi-Fi and a valid Firebase ID token.
 
 ## Hardware requirements
 
-### Controller and user interface
+### Controller and interface
 
 - ESP32 development board
-- 2.8-inch ST7789 SPI TFT display, 320 × 240 pixels
+- 2.8-inch ST7789 SPI TFT display, 320 x 240 pixels
 - 2 momentary push buttons
-- 2 × 10 kΩ resistors for button pull-downs
+- 2 x 10 kOhm resistors for button pull-downs
 
 ### Sensors
 
@@ -69,20 +83,20 @@ Normal display pages are overridden by a red warning screen whenever the flame s
 - MQ-2 gas/smoke sensor module
 - Flame sensor module
 - PIR motion sensor
-- 2 ultrasonic distance sensors, one for the tap and one for the dustbin
+- 2 ultrasonic distance sensors: one for the tap and one for the dustbin
 
 ### Actuators
 
-- 2 relay channels, for the tap/water pump and exhaust fan
+- 2 relay channels: tap/water pump and exhaust fan
 - LED or suitable lighting module
 - Active buzzer
-- 2 servo motors, for the dustbin and emergency mechanism
-- Water pump/valve, fan, and any mechanical parts appropriate to the prototype
-- External regulated power supply suitable for the relays, servos, pump, and fan
+- 2 servo motors: dustbin mechanism and emergency mechanism
+- Water pump or valve, fan, and suitable mechanical components
+- External regulated power supply suitable for the actuators
 
 ## Complete wiring
 
-The following table reflects the pin definitions in [`code/code.ino`](code/code.ino).
+The following connections match the pin definitions in [`code/code.ino`](code/code.ino).
 
 ### ST7789 SPI display
 
@@ -97,20 +111,20 @@ The following table reflects the pin definitions in [`code/code.ino`](code/code.
 | SCL / SCK | GPIO 18 | SPI clock |
 | BLK / LED | 3.3 V | Backlight always on |
 
-The firmware does not use MISO or touch-controller pins. The display is initialized as `240 × 320` and rotated into landscape orientation.
+The firmware initializes the display as 240 x 320 and rotates it into landscape orientation. MISO and touch-controller pins are not used.
 
 ### Push buttons
 
 | Function | ESP32 pin | Required connection |
 | --- | --- | --- |
-| Change display page | GPIO 34 | Button to 3.3 V and external 10 kΩ pull-down to GND |
-| Cooking completed | GPIO 35 | Button to 3.3 V and external 10 kΩ pull-down to GND |
+| Change display page | GPIO 34 | Button to 3.3 V and external 10 kOhm pull-down to GND |
+| Cooking completed | GPIO 35 | Button to 3.3 V and external 10 kOhm pull-down to GND |
 
-GPIO 34 and GPIO 35 are input-only pins and do not provide internal pull-up or pull-down resistors. The external resistors are required to prevent floating input values.
+GPIO 34 and GPIO 35 are input-only pins without internal pull-up or pull-down resistors. External resistors are required to prevent floating readings.
 
 ### Sensors
 
-| Sensor/function | ESP32 pin | Direction |
+| Sensor or function | ESP32 pin | Direction |
 | --- | --- | --- |
 | PIR motion output | GPIO 36 (VP) | Input |
 | Flame sensor digital output | GPIO 39 (VN) | Input |
@@ -123,7 +137,7 @@ GPIO 34 and GPIO 35 are input-only pins and do not provide internal pull-up or p
 
 ### Actuators
 
-| Component/function | ESP32 pin | Direction |
+| Component or function | ESP32 pin | Direction |
 | --- | --- | --- |
 | Tap/water-pump relay | GPIO 12 | Output |
 | Exhaust-fan relay | GPIO 4 | Output |
@@ -134,130 +148,209 @@ GPIO 34 and GPIO 35 are input-only pins and do not provide internal pull-up or p
 
 ## Power and electrical safety
 
-1. Do not power motors, servos, pumps, fans, or relay coils directly from the ESP32's 3.3 V pin. Use a separate regulated supply with enough current for the connected loads.
-2. Connect the external supply ground to ESP32 GND so that all signal voltages have the same reference.
-3. ESP32 GPIO pins are **not 5 V tolerant**. If an ultrasonic sensor's ECHO pin outputs 5 V, use a voltage divider or logic-level converter before the ESP32 input.
-4. Confirm that sensor outputs and relay inputs are compatible with 3.3 V logic.
-5. Use a current-limiting resistor and a suitable driver if GPIO 16 controls more than a small LED.
-6. Use relay isolation, flyback protection, suitable fuses, and correctly rated wiring for inductive or high-current loads.
-7. Keep mains voltage away from breadboards and exposed low-voltage wiring. Mains wiring should be completed only by someone qualified to do it safely.
-8. GPIO 12 is an ESP32 boot-strapping pin. Some relay modules can force it to the wrong level during startup and prevent booting. If that occurs, isolate the relay input or redesign the pin assignment before deploying the circuit.
+1. Do not power motors, servos, pumps, fans, or relay coils directly from the ESP32 3.3 V pin. Use an external regulated supply with enough current for the connected loads.
+2. Connect the external supply ground to ESP32 GND so all signal voltages share the same reference.
+3. ESP32 GPIO pins are not 5 V tolerant. If an ultrasonic ECHO pin produces 5 V, use a voltage divider or logic-level converter.
+4. Confirm that all sensor outputs and relay inputs are compatible with 3.3 V logic.
+5. Use a current-limiting resistor and suitable driver if GPIO 16 controls more than a small LED.
+6. Use flyback protection, correctly rated relays, fuses, and wiring for inductive or high-current loads.
+7. Keep mains voltage away from breadboards and exposed low-voltage wiring. Mains wiring should only be performed by someone qualified to do it safely.
+8. GPIO 12 is an ESP32 boot-strapping pin. Some relay modules may force an invalid startup level and prevent booting.
+9. Test every emergency response with safe simulated inputs before connecting pumps, valves, or other real loads.
 
 ## Software requirements
 
 ### Development tools
 
 - Arduino IDE 2.x or Arduino CLI
-- Espressif ESP32 board package
-- A data-capable USB cable and the correct serial driver for the ESP32 board
+- Espressif ESP32 Arduino board package
+- Data-capable USB cable
+- Serial driver appropriate for the ESP32 development board
 
 ### Arduino libraries
 
-Install these libraries through **Arduino IDE → Tools → Manage Libraries**:
+Install the following libraries using Arduino IDE Library Manager.
 
-| Library | Header used by the firmware | Notes |
+| Library | Header used | Purpose |
 | --- | --- | --- |
-| ArduinoJson | `ArduinoJson.h` | Parses meal data returned by the backend. The code uses the ArduinoJson 6 `DynamicJsonDocument` API. |
+| ArduinoJson 6 | `ArduinoJson.h` | Parses Firebase Authentication and meal JSON responses. |
 | Adafruit GFX Library | `Adafruit_GFX.h` | Graphics primitives and text rendering. |
 | Adafruit ST7735 and ST7789 Library | `Adafruit_ST7789.h` | ST7789 display driver. |
-| DHT sensor library by Adafruit | `DHT.h` | Reads the DHT11. |
+| DHT sensor library by Adafruit | `DHT.h` | Reads the DHT11 sensor. |
 | Adafruit Unified Sensor | Indirect dependency | Common dependency of the DHT library. |
-| ESP32Servo | `ESP32Servo.h` | Generates the two servo control signals. |
+| ESP32Servo | `ESP32Servo.h` | Controls both servo motors. |
 
-`WiFi`, `WiFiClientSecure`, `HTTPClient`, `SPI`, `time`, and FreeRTOS support are supplied by the ESP32 Arduino core.
+`WiFi`, `WiFiClientSecure`, `HTTPClient`, `SPI`, `time`, and FreeRTOS support are provided by the ESP32 Arduino core.
+
+## Firebase setup
+
+The firmware requires a Firebase project with Email/Password Authentication and Realtime Database.
+
+### 1. Enable Email/Password Authentication
+
+In the Firebase project:
+
+1. Open Authentication.
+2. Enable the Email/Password sign-in provider.
+3. Create a dedicated user account for the ESP32.
+4. Do not reuse a personal account password.
+
+The ESP32 uses the Firebase Identity Toolkit `accounts:signInWithPassword` endpoint. A successful login supplies the ID token used by all database requests.
+
+### 2. Create Realtime Database
+
+Create a Firebase Realtime Database and note its complete database URL. Depending on the database region, it may resemble one of these forms:
+
+```text
+https://PROJECT_ID-default-rtdb.firebaseio.com
+https://PROJECT_ID.REGION.firebasedatabase.app
+```
+
+Do not add a trailing slash to `firebaseHost`; the firmware adds path separators itself.
+
+### 3. Configure database rules
+
+Database rules must allow the authenticated ESP32 user to access `/meal`, `/sensors`, `/kitchen`, and `/warning`. Use the least privilege appropriate to the project.
+
+The following rules are suitable only as a simple authenticated prototype starting point because any authenticated project user receives access to all four paths:
+
+```json
+{
+  "rules": {
+    "meal": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "sensors": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "kitchen": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "warning": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}
+```
+
+For a real deployment, restrict access to the dedicated device user and validate the allowed fields and value types.
+
+### 4. Collect configuration values
+
+You need:
+
+- The Web API key from Firebase project settings
+- The complete Realtime Database URL
+- The dedicated Firebase user's email address
+- The dedicated Firebase user's password
+- The local 2.4 GHz Wi-Fi SSID and password
+
+Keep real values in `code/secrets.h`, which is excluded by [`.gitignore`](.gitignore).
 
 ## Installation and upload
 
 1. Clone or download this repository.
-2. Open [`code/code.ino`](code/code.ino) in Arduino IDE.
-3. Install the ESP32 board package and all libraries listed above.
-4. In **Tools → Board**, select the ESP32 board that matches your hardware. For a common generic board, use **ESP32 Dev Module**.
-5. Select the correct serial port.
-6. Copy `code/secrets.example.h` to `code/secrets.h`, then enter the Wi-Fi details as described in the next section.
-7. Complete and verify the wiring before applying actuator power.
-8. Compile the sketch with **Verify**.
-9. Upload it to the ESP32.
-10. Open Serial Monitor at **115200 baud** and reset the board.
+2. Copy [`code/secrets.example.h`](code/secrets.example.h) to `code/secrets.h` if the private file does not already exist.
+3. Replace every example value in `code/secrets.h` with the correct Wi-Fi and Firebase configuration.
+4. Open [`code/code.ino`](code/code.ino) in Arduino IDE.
+5. Install the ESP32 board package and the required libraries.
+6. Select the board matching the hardware. `ESP32 Dev Module` is appropriate for many generic boards.
+7. Select the correct serial port.
+8. Complete and verify the low-voltage wiring before applying actuator power.
+9. Compile the sketch using Verify.
+10. Upload the firmware.
+11. Open Serial Monitor at 115200 baud and reset the board.
 
-If uploading does not begin automatically, hold the board's **BOOT** button while the IDE starts the upload, then release it when writing begins. The exact procedure depends on the ESP32 board.
+If uploading does not begin automatically, hold the board's BOOT button while upload starts, then release it when writing begins. The exact procedure depends on the board.
 
 ## Configuration
 
-General configuration values are near the top of [`code/code.ino`](code/code.ino). Private Wi-Fi settings are kept separately in `code/secrets.h`.
+### Private settings
 
-### Wi-Fi
+The firmware expects these constants in `code/secrets.h`:
 
-1. Copy [`code/secrets.example.h`](code/secrets.example.h) to `code/secrets.h`.
-2. Open the new `code/secrets.h` file.
-3. Set `ssid` and `password` to the network the ESP32 should use.
-4. Set `apiGetMeals`, `apiPostSensors`, and `apiPostCooking` to the HTTPS endpoints from your backend deployment.
-5. Keep `code/secrets.h` private. It is excluded by [`.gitignore`](.gitignore) and must not be committed.
+```cpp
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
 
-A 2.4 GHz Wi-Fi network is normally required by ESP32 boards. The public example file contains placeholders and is safe to commit.
+const char* firebaseHost = "https://YOUR_PROJECT-default-rtdb.firebaseio.com";
+const char* firebaseApiKey = "YOUR_FIREBASE_WEB_API_KEY";
+const char* firebaseUserEmail = "YOUR_DEVICE_USER_EMAIL";
+const char* firebaseUserPassword = "YOUR_DEVICE_USER_PASSWORD";
+```
 
-> [!CAUTION]
-> Credentials previously stored directly in the sketch must be treated as exposed if an earlier copy or commit was shared. Change that Wi-Fi password before publishing the repository. Removing a password in a later commit does not remove it from Git history.
-
-### Backend URLs
-
-The local `code/secrets.h` file defines these backend endpoints:
-
-| Operation | Endpoint |
+| Constant | Description |
 | --- | --- |
-| Fetch meal information | `apiGetMeals` |
-| Send sensor readings | `apiPostSensors` |
-| Send cooking-completed event | `apiPostCooking` |
+| `ssid` | 2.4 GHz Wi-Fi network name |
+| `password` | Wi-Fi password |
+| `firebaseHost` | Complete Realtime Database base URL without a trailing slash |
+| `firebaseApiKey` | Firebase project's Web API key used for Email/Password login |
+| `firebaseUserEmail` | Email of the dedicated Firebase Authentication user |
+| `firebaseUserPassword` | Password of the dedicated Firebase Authentication user |
 
-Real endpoint URLs are intentionally excluded from Git. Anyone cloning the project must copy `code/secrets.example.h` to `code/secrets.h` and replace the example domain with their backend domain.
+The Firebase Web API key identifies the Firebase project but does not replace database rules or user authentication. The Wi-Fi password and Firebase user password are credentials and must remain private.
 
 ### Thresholds and timings
 
+These values are defined near the top of [`code/code.ino`](code/code.ino).
+
 | Setting | Current value | Effect |
 | --- | ---: | --- |
-| `GAS_THRESHOLD` | `15000` | A reading above this value is treated as a gas leak. See the limitation below. |
-| `TEMP_THRESHOLD` | `32.0 °C` | Turns on the exhaust fan at or above this temperature. |
+| `GAS_THRESHOLD` | `15000` | A higher MQ-2 reading is treated as a gas leak. See the limitation below. |
+| `TEMP_THRESHOLD` | `32.0 C` | Turns on the exhaust fan at or above this temperature. |
 | `DISTANCE_THRESHOLD` | `15 cm` | Activates the tap or opens the dustbin below this distance. |
 | `LED_DELAY` | `60000 ms` | Turns the light off after one minute without detected motion. |
-| Sensor/backend interval | `60000 ms` | Posts readings and refreshes meals once per minute while connected. |
+| Firebase synchronization | `60000 ms` | Uploads sensor data and downloads meals once per minute. |
+| Authentication interval | `3000000 ms` | Signs in again after approximately 50 minutes. |
 | Page-button debounce | `300 ms` | Prevents repeated page changes from one press. |
 | Cooking-button debounce | `1000 ms` | Prevents repeated cooking events from one press. |
 
-MQ-2 readings vary by sensor, supply voltage, warm-up time, load resistor, environment, and ADC configuration. Calibrate the threshold using measurements from the actual circuit; do not treat a raw ADC value as a calibrated gas concentration.
+MQ-2 readings depend on the module, supply voltage, warm-up period, environment, and ADC settings. Calibrate with the actual circuit. A raw ADC reading is not a calibrated gas concentration.
 
 ## Display and controls
 
 ### Startup
 
-The display shows `Connecting to Wi-Fi...` while the firmware waits for up to approximately 10 seconds. If connection fails, local automation and the display continue in offline mode. The network task keeps attempting to reconnect.
+The TFT displays `Connecting to Wi-Fi...` while the initial connection attempt runs for up to approximately 10 seconds. The display is then cleared. If Wi-Fi or Firebase authentication is unavailable, local automation continues and the firmware keeps retrying in the background.
+
+### Top status bar
+
+- `WIFI OK` means Wi-Fi is connected and a Firebase ID token is available.
+- `NO AUTH` means either Wi-Fi is disconnected or Firebase is not authenticated.
+- The date and time appear after successful NTP synchronization.
 
 ### Meal page
 
-The default page displays:
+The default page shows:
 
 - Date and time
-- Wi-Fi status (`WIFI OK` or `NO WIFI`)
+- Authentication status
 - Breakfast, lunch, and dinner counts
 - Menu text for each meal
-- Total meal count
+- Calculated total meal count
 
 ### Sensor page
 
-The sensor page displays:
+The sensor page shows:
 
 - Date and time
-- Wi-Fi status
+- Authentication status
 - Temperature in degrees Celsius
 - Relative humidity percentage
-- Raw MQ-2 gas ADC reading
+- Raw MQ-2 ADC reading
 
 ### Warning page
 
-When flame or gas is detected, the normal pages are replaced by a red `WARNING! FIRE/GAS DETECTED` screen. The page selector does not override this safety screen.
+During a flame or gas emergency, a red `WARNING! FIRE/GAS DETECTED` screen overrides both normal pages. The previous normal page returns when the emergency clears.
 
 ### Buttons
 
-- Press **Page Toggle** to switch between the meal page and sensor page.
-- Press **Cooking Done** to send `{"status":"cooking_done"}` to the backend. This requires an active Wi-Fi connection.
+- Page Toggle switches between the meal page and sensor page.
+- Cooking Done writes `{"status":"cooking_done"}` to `/kitchen` when Wi-Fi and Firebase authentication are available.
 
 ## Automation rules
 
@@ -265,53 +358,67 @@ When flame or gas is detected, the normal pages are replaced by a red `WARNING! 
 | --- | --- |
 | Tap distance is below 15 cm | Tap/water-pump relay turns on. |
 | Flame is detected | Tap/water-pump relay turns on. |
-| Dustbin distance is below 15 cm | Dustbin servo moves to 90°; otherwise it returns to 0°. |
-| PIR motion is detected | Light turns on and the one-minute off timer restarts. |
-| No motion for one minute | Light turns off. |
-| Temperature is at least 32 °C | Exhaust-fan relay turns on. |
-| Gas reading is above the gas threshold | Exhaust fan, buzzer, warning screen, and emergency servo activate. |
+| Dustbin distance is below 15 cm | Dustbin servo moves to 90 degrees; otherwise it returns to 0 degrees. |
+| PIR motion is detected | Light turns on and the one-minute timer restarts. |
+| No motion is detected for one minute | Light turns off. |
+| Temperature is at least 32 C | Exhaust-fan relay turns on. |
+| Gas reading is above the threshold | Fan, buzzer, warning screen, and emergency servo activate. |
 | Flame is detected | Buzzer, warning screen, and emergency servo activate. |
-| No flame or gas emergency | Buzzer turns off and emergency servo returns to 0°. |
+| Emergency begins | The firmware attempts to write an active warning and message to Firebase. |
+| Emergency clears | The firmware attempts to write an inactive `Normal` warning to Firebase. |
+| No emergency exists | Buzzer turns off and the emergency servo returns to 0 degrees. |
 
-The relay logic is written as active HIGH. If a connected relay module is active LOW, its physical behavior will be inverted unless the firmware or interface circuitry is adapted.
+Relay outputs are active HIGH in the firmware. An active-LOW relay module will behave in the opposite way unless the firmware or interface circuitry is adapted.
 
-The flame input is also interpreted as active HIGH. Many flame sensor modules are active LOW, so verify the module's output before testing the emergency behavior.
+The flame input is interpreted as active HIGH. Many flame modules provide active-LOW digital output, so verify the specific module before testing emergency behavior.
 
-## Backend API contract
+## Firebase data model
 
-### Fetch meals
-
-Request:
-
-```http
-GET /api/meal
-```
-
-Expected JSON response:
+The firmware uses four root-level Realtime Database nodes.
 
 ```json
 {
-  "bfast_count": 12,
-  "lunch_count": 20,
-  "dinner_count": 18,
-  "bfast_menu": "Egg and bread",
-  "lunch_menu": "Rice and chicken",
-  "dinner_menu": "Rice and vegetables"
+  "meal": {
+    "bfast_count": 12,
+    "lunch_count": 20,
+    "dinner_count": 18,
+    "bfast_menu": "Egg and bread",
+    "lunch_menu": "Rice and chicken",
+    "dinner_menu": "Rice and vegetables"
+  },
+  "sensors": {
+    "temp": 29.5,
+    "humidity": 68.0,
+    "gas": 1240
+  },
+  "kitchen": {
+    "status": "cooking_done"
+  },
+  "warning": {
+    "active": false,
+    "message": "Normal"
+  }
 }
 ```
 
-Missing numeric fields default to `0`, and missing menu fields default to `"-"`. The firmware calculates `totalCount` locally by adding the three counts. The JSON document capacity is 1024 bytes, so unusually large responses may fail to parse.
+### `/meal`
 
-### Post sensor readings
+The ESP32 reads this object using `GET`.
 
-Request:
+| Field | Type | Firmware behavior |
+| --- | --- | --- |
+| `bfast_count` | Number | Defaults to `0` when absent. |
+| `lunch_count` | Number | Defaults to `0` when absent. |
+| `dinner_count` | Number | Defaults to `0` when absent. |
+| `bfast_menu` | String | Defaults to `-` when absent. |
+| `lunch_menu` | String | Defaults to `-` when absent. |
+| `dinner_menu` | String | Defaults to `-` when absent. |
 
-```http
-POST /api/sensors
-Content-Type: application/json
-```
+The total is calculated locally as breakfast + lunch + dinner. The JSON document capacity for this response is 1024 bytes.
 
-Body:
+### `/sensors`
+
+The ESP32 replaces this object using `PUT` approximately every 60 seconds:
 
 ```json
 {
@@ -321,18 +428,11 @@ Body:
 }
 ```
 
-The firmware sends this request approximately every 60 seconds while Wi-Fi is connected. `gas` is a raw ADC reading, not a concentration such as ppm.
+`gas` is a raw ADC reading, not a concentration such as ppm. Because `PUT` replaces the node, other fields previously stored under `/sensors` are removed.
 
-### Post cooking status
+### `/kitchen`
 
-Request:
-
-```http
-POST /api/kitchen
-Content-Type: application/json
-```
-
-Body:
+The ESP32 replaces this object using `PUT` when the Cooking Done button is pressed:
 
 ```json
 {
@@ -340,114 +440,171 @@ Body:
 }
 ```
 
-The response body is not processed. For POST requests, only the HTTP response code is printed to Serial.
+### `/warning`
+
+When emergency state changes, the ESP32 replaces this object using `PUT`.
+
+Fire example:
+
+```json
+{
+  "active": true,
+  "message": "Fire Detected"
+}
+```
+
+Gas example:
+
+```json
+{
+  "active": true,
+  "message": "Gas Leak Detected"
+}
+```
+
+Cleared example:
+
+```json
+{
+  "active": false,
+  "message": "Normal"
+}
+```
+
+If both fire and gas are active at the transition, the message is `Fire Detected` because the firmware checks the flame state first when choosing the text.
+
+## Cloud synchronization behavior
+
+| Function | Method and path | Trigger |
+| --- | --- | --- |
+| Firebase login | `POST accounts:signInWithPassword` | Startup, missing token, or token age above 50 minutes |
+| Fetch meals | `GET /meal.json?auth=<token>` | After successful startup login and every 60 seconds |
+| Upload sensors | `PUT /sensors.json?auth=<token>` | Every 60 seconds |
+| Upload cooking status | `PUT /kitchen.json?auth=<token>` | Cooking Done button press |
+| Upload warning state | `PUT /warning.json?auth=<token>` | Emergency state transition |
+
+Periodic synchronization only checks that Wi-Fi is connected before calling the Firebase functions. Each Firebase function also checks that the ID token is non-empty.
 
 ## Project structure
 
 ```text
 iot_project/
-├── .gitignore         # Excludes credentials and generated files
-├── README.md          # Main project documentation
-├── WIRING.md          # Short wiring reference
-└── code/
-    ├── code.ino          # Current ESP32 firmware
-    ├── secrets.example.h # Safe credential template (commit this)
-    └── secrets.h         # Local credentials (ignored; do not commit)
+|-- .gitignore             # Excludes credentials and generated files
+|-- README.md              # Main project documentation
+|-- WIRING.md              # Compact wiring reference
+`-- code/
+    |-- code.ino           # ESP32 firmware
+    |-- secrets.example.h  # Public configuration template
+    `-- secrets.h          # Private local credentials; ignored by Git
 ```
 
 ## Serial monitoring
 
-Use **115200 baud**. The firmware prints:
+Open Serial Monitor at 115200 baud. The current firmware prints:
 
-- Hardware and network startup progress
-- The assigned local IP address after connecting
-- Sensor readings every two seconds
-- Emergency state changes
-- Button events and display page changes
-- API success, failure, and HTTP response codes
+- Project startup and hardware initialization messages
+- Firebase Authentication success or HTTP failure code
+- Temperature, humidity, raw gas value, and flame state every two seconds
+- Emergency triggered and emergency cleared events
 
-Example sensor line:
+Example sensor output:
 
 ```text
-[Core 1] Temp: 29.5C | Hum: 68.0% | Gas: 1240 | Fire: 0 | Tap Dist: 32cm | Bin Dist: 45cm
+[Core 1] Temp: 29.5C | Hum: 68.0% | Gas: 1240 | Fire: 0
 ```
 
-An ultrasonic timeout is represented internally as `999 cm`, which prevents the associated tap or bin action from triggering.
+The current firmware does not print ultrasonic distances, Firebase database response codes, button presses, or the assigned local IP address.
+
+An ultrasonic timeout is represented internally as `999 cm`, preventing the associated tap or dustbin action from activating.
 
 ## Troubleshooting
 
+### The firmware does not compile because `secrets.h` is missing
+
+Copy `code/secrets.example.h` to `code/secrets.h`. Confirm that the new file is in the same directory as `code.ino` and defines all six required constants.
+
+### Firebase authentication fails
+
+- Confirm Email/Password sign-in is enabled in Firebase Authentication.
+- Confirm `firebaseApiKey`, `firebaseUserEmail`, and `firebaseUserPassword` are correct.
+- Confirm the dedicated Firebase user exists and is enabled.
+- Check the authentication HTTP code in Serial Monitor.
+- Confirm the ESP32 has internet access and can resolve Google domains.
+
+### Authentication succeeds but database data does not update
+
+- Confirm `firebaseHost` is the exact Realtime Database URL without a trailing slash.
+- Confirm database rules permit the authenticated user to read and write the required paths.
+- Confirm `/meal` uses the exact field names documented above.
+- Keep the `/meal` response small enough for the 1024-byte JSON document.
+- The current firmware does not print database REST response codes, so inspect Firebase or add temporary diagnostics when debugging.
+
+### The display shows `NO AUTH`
+
+This label combines two conditions: Wi-Fi disconnection and missing Firebase authentication. Check the Wi-Fi credentials first, then check Serial Monitor for Firebase login failure codes.
+
 ### The ESP32 does not boot or repeatedly resets
 
-- Disconnect servos, pumps, fans, and relays, then test the ESP32 by itself.
-- Use an external supply with adequate current for actuators.
-- Confirm that external power and ESP32 grounds are connected.
+- Disconnect servos, pumps, fans, and relays, then test the ESP32 alone.
+- Use an external actuator supply with adequate current.
+- Connect the actuator supply ground to ESP32 GND.
 - Check whether the GPIO 12 relay input is interfering with the ESP32 boot-strapping level.
 - Look for brownout messages in Serial Monitor.
 
 ### The display is blank or corrupted
 
-- Confirm the display driver is ST7789 and the module is wired for SPI.
+- Confirm the display controller is ST7789 and the module uses SPI.
 - Verify CS, DC, RESET, MOSI, and SCK against the wiring table.
-- Confirm that the module accepts 3.3 V on VCC; check the module documentation before applying another voltage.
+- Confirm the display power voltage using its documentation.
 - Check the backlight connection.
-- Confirm that both Adafruit GFX and the ST7789 library are installed.
+- Confirm the Adafruit GFX and ST7789 libraries are installed.
 
 ### Buttons change state randomly
 
-- Install the required external 10 kΩ pull-down resistors on GPIO 34 and GPIO 35.
+- Install external 10 kOhm pull-down resistors on GPIO 34 and GPIO 35.
 - Keep button wires short and ensure there is a common ground.
 
-### Ultrasonic distance always reads 999 cm
+### Ultrasonic distance always times out
 
-- Check TRIG and ECHO orientation and power.
+- Check TRIG and ECHO wiring.
 - Ensure the sensor and ESP32 share ground.
-- Use safe level shifting on a 5 V ECHO output.
-- Confirm that the object is inside the sensor's usable range and is easy to reflect ultrasound from.
+- Safely level-shift a 5 V ECHO signal.
+- Confirm that the target is inside the sensor's useful range.
 
 ### Temperature or humidity does not update
 
-- Verify the DHT type is DHT11 and the data wire is connected to GPIO 33.
-- Add the pull-up resistor required by a bare DHT11 sensor, if the module does not already include one.
-- DHT11 devices update slowly. The main loop polls faster than the sensor's normal rate, so failed reads can occur; the firmware retains the last valid shared value.
-
-### Wi-Fi does not connect
-
-- Confirm the SSID and password.
-- Use a 2.4 GHz network.
-- Move the ESP32 closer to the access point.
-- Check Serial Monitor for connection status.
-- The first attempt times out after about 10 seconds, but reconnection attempts continue in the background.
-
-### API data does not appear
-
-- Confirm Wi-Fi shows as connected.
-- Test each endpoint independently and verify its JSON field names match this README.
-- Check the HTTP response code in Serial Monitor.
-- Keep the meal response below the parser's 1024-byte document capacity.
-- Confirm the server accepts the request body and `Content-Type: application/json`.
+- Verify that the device is a DHT11 connected to GPIO 33.
+- Add the required data pull-up resistor if a bare DHT11 does not include one.
+- DHT11 sensors update slowly. The firmware polls faster than their usual update rate, ignores failed reads, and retains the last valid shared value.
 
 ### Emergency mode never activates for gas
 
-On a standard ESP32 Arduino configuration, `analogRead()` normally produces values from `0` to `4095`, while the current `GAS_THRESHOLD` is `15000`. Therefore, the gas condition cannot normally become true with the current settings. This README documents the behavior exactly as the code is written; calibrate and correct the threshold in the firmware before relying on gas detection.
+On a standard ESP32 Arduino configuration, `analogRead()` normally returns values from 0 to 4095, but the current `GAS_THRESHOLD` is 15000. The gas condition therefore cannot normally become true. Calibrate the sensor and correct the firmware threshold before relying on gas detection.
 
 ## Known limitations and security notes
 
-- Wi-Fi credentials and backend URLs are stored in the ignored `code/secrets.h` file. Never force-add that file, and rotate any credentials that were exposed in an earlier copy or commit.
-- HTTPS uses `client.setInsecure()`, which encrypts traffic but does not verify the server certificate. This leaves requests vulnerable to server impersonation. Production firmware should validate a CA certificate or certificate/public-key pin.
-- The configured gas threshold of `15000` is above the usual 12-bit ESP32 ADC maximum of `4095`, so gas emergencies normally cannot trigger until that setting is corrected.
-- The MQ-2 value is uncalibrated raw ADC data and is not a ppm measurement.
-- JSON deserialization errors are not checked. A malformed or oversized meal response can silently leave values at defaults.
-- HTTP success ranges are not validated beyond checking that a GET returned a positive code. POST response bodies are ignored.
-- NTP uses a fixed UTC+6 offset and no daylight-saving rule, which is appropriate for Bangladesh but not for deployment in other time zones.
-- The DHT11 is polled far more frequently than its typical update rate; failed reads are ignored and the last valid values are retained.
-- UI and network work share one FreeRTOS task. Slow HTTPS requests can temporarily delay display and button handling.
-- Servo angles, sensor polarities, relay polarities, and thresholds require calibration for the actual hardware.
-- The firmware has no remote authentication logic of its own; backend access control depends entirely on the server.
-- Local automation continues offline, but meal updates, time synchronization, sensor uploads, and cooking-status messages require Wi-Fi and a reachable backend.
+- `code/secrets.h` contains private Wi-Fi and Firebase credentials and must never be committed.
+- Verify that the tracked `code/secrets.example.h` contains placeholders only before every public push.
+- If credentials were committed previously, removing them in a later commit is insufficient. Rotate them and remove them from Git history.
+- HTTPS requests use `client.setInsecure()`. Traffic is encrypted, but server certificates are not verified, allowing server impersonation attacks.
+- Firebase login sends the configured user's email and password from the device. A dedicated least-privilege account is essential.
+- The ID token is stored in RAM as a `String` and appended to database request URLs.
+- The firmware signs in again every 50 minutes instead of using the returned Firebase refresh token.
+- The configured gas threshold of 15000 exceeds the usual 12-bit ESP32 ADC maximum of 4095.
+- MQ-2 data is an uncalibrated raw ADC value, not a ppm measurement.
+- JSON deserialization errors are not checked.
+- Database write response codes are ignored, so failed writes are not reported or retried.
+- A warning is uploaded only when local emergency state changes. If Wi-Fi or authentication is unavailable at that moment, that state is not queued for later upload.
+- Firebase operations can occur from both ESP32 cores, and shared network/authentication objects are not protected by a separate mutex.
+- The DHT11 is polled more frequently than its normal update rate.
+- NTP uses fixed UTC+6 without a daylight-saving rule.
+- UI and network work share one task, so slow HTTPS calls can temporarily delay display and button handling.
+- Relay polarity, flame-sensor polarity, servo angles, and all sensor thresholds require validation using the actual hardware.
+- Local automation continues offline, but Firebase features and initial NTP synchronization require internet access.
 
 ## Additional documentation
 
-See [`WIRING.md`](WIRING.md) for a compact wiring-only reference. The current source of truth for implemented behavior is [`code/code.ino`](code/code.ino).
+See [`WIRING.md`](WIRING.md) for a compact wiring reference. The implemented behavior in [`code/code.ino`](code/code.ino) is the source of truth.
 
 ## License
 
