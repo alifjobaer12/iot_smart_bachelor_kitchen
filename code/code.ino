@@ -13,13 +13,15 @@
 // ==========================================
 // PIN DEFINITIONS
 // ==========================================
+// ST7789 SPI Display
 #define TFT_CS    5
 #define TFT_DC    2
 #define TFT_RST   15
 
-#define BTN_PAGE  34 
-#define BTN_COOK  35 
+// Dedicated Cooking Button Pin (Internal Pull-Up -> Connect between Pin 13 and GND)
+#define BTN_COOK  13 
 
+// Sensors
 #define PIR_PIN   36
 #define FLAME_PIN 39
 #define MQ2_PIN   32
@@ -29,6 +31,7 @@
 #define TRIG_BIN  27
 #define ECHO_BIN  14
 
+// Actuators
 #define RELAY_TAP       12 
 #define RELAY_FAN       4
 #define LED_PIN         16
@@ -43,6 +46,7 @@ const int GAS_THRESHOLD = 15000;
 const float TEMP_THRESHOLD = 32.0;    
 const int DISTANCE_THRESHOLD = 15;    
 const unsigned long LED_DELAY = 60000;
+const unsigned long PAGE_AUTO_SWITCH_INTERVAL = 10000; // 8 seconds per page
 
 // ==========================================
 // OBJECTS & THREADING
@@ -72,9 +76,23 @@ bool warningTriggered = false;
 String bfastMenu = "-", lunchMenu = "-", dinnerMenu = "-";
 int bfastCount = 0, lunchCount = 0, dinnerCount = 0, totalCount = 0;
 
+// ==========================================
+// HARDWARE INTERRUPT (ISR) ROUTINE
+// ==========================================
+volatile bool flagCookPressed = false;
+volatile unsigned long lastCookIsrTime = 0;
+
+void IRAM_ATTR isrCookButton() {
+  unsigned long now = millis();
+  if (now - lastCookIsrTime > 1000) { // 1000ms debounce
+    flagCookPressed = true;
+    lastCookIsrTime = now;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n--- ESP32 Smart Project Starting (Firebase Auth) ---");
+  Serial.println("\n--- ESP32 Smart Project Starting ---");
 
   dataMutex = xSemaphoreCreateMutex();
 
@@ -82,10 +100,13 @@ void setup() {
   initHardware();
 
   Serial.println("Starting UI and Network Task (Core 0)...");
-  xTaskCreatePinnedToCore(TaskUI_Network, "TaskUI", 10000, NULL, 1, &TaskUI, 0); 
+  xTaskCreatePinnedToCore(TaskUI_Network, "TaskUI", 20000, NULL, 1, &TaskUI, 0); 
 }
 
 void loop() {
+  // ==========================================
+  // CORE 1: HARDWARE LOGIC 
+  // ==========================================
   unsigned long currentMillis = millis();
   static unsigned long lastMotionTime = 0;
   static unsigned long lastSerialPrint = 0;
@@ -172,8 +193,6 @@ void TaskUI_Network(void * pvParameters) {
 
   if (WiFi.status() == WL_CONNECTED) {
     configTime(21600, 0, "pool.ntp.org", "time.nist.gov"); 
-    
-    // Authenticate with Firebase on startup
     if (loginFirebase()) {
       fetchMealsFirebase();
     }
@@ -182,35 +201,32 @@ void TaskUI_Network(void * pvParameters) {
   tft.fillScreen(ST77XX_BLACK); 
 
   unsigned long lastApiTime = 0;
-  bool lastBtnPage = LOW;
-  bool lastBtnCook = LOW;
-  unsigned long debouncePageTimer = 0;
-  unsigned long debounceCookTimer = 0;
+  unsigned long lastPageSwitchTime = millis();
 
   for(;;) { 
     if (WiFi.status() != WL_CONNECTED) {
       WiFi.begin(ssid, password);
     } else if (firebaseIdToken == "" || (millis() - tokenAuthTime > 3000000)) {
-      // Refresh token if empty or approaching 1 hour expiry (50 mins = 3000000ms)
       loginFirebase();
     }
 
-    bool btnPage = digitalRead(BTN_PAGE);
-    bool btnCook = digitalRead(BTN_COOK);
-
-    if (btnPage == HIGH && lastBtnPage == LOW && (millis() - debouncePageTimer > 300)) {
+    // 1. Automatic Page Switcher (Every 8s)
+    if (millis() - lastPageSwitchTime >= PAGE_AUTO_SWITCH_INTERVAL) {
       currentPage = (currentPage == 0) ? 1 : 0;
       tft.fillScreen(ST77XX_BLACK);
-      debouncePageTimer = millis();
+      lastPageSwitchTime = millis();
     }
-    lastBtnPage = btnPage;
 
-    if (btnCook == HIGH && lastBtnCook == LOW && (millis() - debounceCookTimer > 1000)) {
-      postCookingFirebase();
-      debounceCookTimer = millis();
+    // 2. Hardware Interrupt Check for Cook Button on Pin 13
+    if (flagCookPressed) {
+      flagCookPressed = false;
+      if (digitalRead(BTN_COOK) == LOW) { // Pin verified grounded
+        Serial.println("[Core 0] Cook Button Pressed! Sending to Firebase...");
+        postCookingFirebase();
+      }
     }
-    lastBtnCook = btnCook;
 
+    // 3. Thread-safe copy of sensor data
     float cT = 0, cH = 0;
     int cG = 0;
     bool emerg = false;
@@ -222,6 +238,7 @@ void TaskUI_Network(void * pvParameters) {
       xSemaphoreGive(dataMutex);
     }
 
+    // 4. UI Drawing
     if (emerg) {
       if (!warningTriggered) {
         tft.fillScreen(ST77XX_RED);
@@ -237,14 +254,14 @@ void TaskUI_Network(void * pvParameters) {
       else drawSensorPage(cT, cH, cG);
     }
 
-    // Sync with Firebase every 1 minute
-    if (WiFi.status() == WL_CONNECTED && (millis() - lastApiTime > 60000)) {
+    // 5. Periodic Sync every 60 seconds
+    if (WiFi.status() == WL_CONNECTED && (millis() - lastApiTime > 6000)) {
       postSensorsFirebase(cT, cH, cG);
       fetchMealsFirebase();
       lastApiTime = millis();
     }
 
-    vTaskDelay(200 / portTICK_PERIOD_MS); 
+    vTaskDelay(20 / portTICK_PERIOD_MS); 
   }
 }
 
@@ -344,8 +361,6 @@ void drawWarningPage() {
 // ==========================================
 // FIREBASE AUTH & REST API FUNCTIONS
 // ==========================================
-
-// Authenticate ESP32 with Firebase Auth Identity Toolkit
 bool loginFirebase() {
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client;
@@ -362,13 +377,15 @@ bool loginFirebase() {
     if (httpCode == 200) {
       String response = http.getString();
       DynamicJsonDocument doc(2048);
-      deserializeJson(doc, response);
+      DeserializationError error = deserializeJson(doc, response);
 
-      firebaseIdToken = doc["idToken"].as<String>();
-      tokenAuthTime = millis();
-      Serial.println("[Firebase] Auth Successful!");
-      http.end();
-      return true;
+      if (!error && doc.containsKey("idToken")) {
+        firebaseIdToken = doc["idToken"].as<String>();
+        tokenAuthTime = millis();
+        Serial.println("[Firebase] Auth Successful!");
+        http.end();
+        return true;
+      }
     } else {
       Serial.printf("[Firebase] Auth Failed! Code: %d\n", httpCode);
     }
@@ -390,15 +407,17 @@ void fetchMealsFirebase() {
     if (httpCode == 200) {
       String payload = http.getString();
       DynamicJsonDocument doc(1024);
-      deserializeJson(doc, payload);
+      DeserializationError error = deserializeJson(doc, payload);
       
-      bfastCount = doc["bfast_count"] | 0;
-      lunchCount = doc["lunch_count"] | 0;
-      dinnerCount = doc["dinner_count"] | 0;
-      totalCount = bfastCount + lunchCount + dinnerCount;
-      bfastMenu = doc["bfast_menu"] | "-";
-      lunchMenu = doc["lunch_menu"] | "-";
-      dinnerMenu = doc["dinner_menu"] | "-";
+      if (!error) {
+        bfastCount = doc["bfast_count"] | 0;
+        lunchCount = doc["lunch_count"] | 0;
+        dinnerCount = doc["dinner_count"] | 0;
+        totalCount = bfastCount + lunchCount + dinnerCount;
+        bfastMenu = doc["bfast_menu"] | "-";
+        lunchMenu = doc["lunch_menu"] | "-";
+        dinnerMenu = doc["dinner_menu"] | "-";
+      }
     }
     http.end();
   }
@@ -438,7 +457,6 @@ void postCookingFirebase() {
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_GREEN);
     tft.print("Cooking Done Message Sent!");
-    delay(1000); 
   }
 }
 
@@ -471,8 +489,9 @@ void initHardware() {
   pinMode(MQ2_PIN, INPUT);
   pinMode(FLAME_PIN, INPUT); 
 
-  pinMode(BTN_PAGE, INPUT);
-  pinMode(BTN_COOK, INPUT);
+  // Cook Button with Internal Pull-Up on Pin 13 (Active LOW)
+  pinMode(BTN_COOK, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BTN_COOK), isrCookButton, FALLING);
 
   pinMode(RELAY_TAP, OUTPUT);
   pinMode(RELAY_FAN, OUTPUT);

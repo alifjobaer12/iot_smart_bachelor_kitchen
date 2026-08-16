@@ -17,8 +17,7 @@
 
 | Button | ESP32 Pin | Wiring Note |
 | --- | --- | --- |
-| **Page Toggle** | 34 | **Must** use a physical 10k pull-down resistor to GND |
-| **Cooking Done** | 35 | **Must** use a physical 10k pull-down resistor to GND |
+| **Cooking Done** | 13 | **Must** use a physical 10k pull-down resistor to GND |
 
 ---
 
