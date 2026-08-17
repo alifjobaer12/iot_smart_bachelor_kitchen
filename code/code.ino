@@ -45,13 +45,21 @@
 // ==========================================
 // THRESHOLDS & TIMINGS
 // ==========================================
-const int GAS_THRESHOLD = 15000;       
+const int GAS_THRESHOLD = 1600;
 const float TEMP_THRESHOLD = 32.0;    
 const int DISTANCE_THRESHOLD = 15;    
 const unsigned long LED_DELAY = 60000;
 const unsigned long PAGE_AUTO_SWITCH_INTERVAL = 10000; // 8 seconds per page
 const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
 const char* WIFI_SETUP_AP_NAME = "SmartKitchen-Setup";
+
+// High-contrast RGB565 display palette
+const uint16_t UI_BG = 0x0841;       // Dark navy
+const uint16_t UI_PANEL = 0x10A2;    // Slightly lighter navy
+const uint16_t UI_TEXT = ST77XX_WHITE;
+const uint16_t UI_ACCENT = ST77XX_CYAN;
+const uint16_t UI_OK = ST77XX_GREEN;
+const uint16_t UI_WARNING = ST77XX_YELLOW;
 
 // ==========================================
 // OBJECTS & THREADING
@@ -189,10 +197,10 @@ void loop() {
 void TaskUI_Network(void * pvParameters) {
   tft.init(240, 320); 
   tft.setRotation(1); 
-  tft.fillScreen(ST77XX_BLACK);
+  tft.fillScreen(UI_BG);
 
   tft.setCursor(10, 10);
-  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextColor(UI_TEXT);
   tft.setTextSize(2);
   tft.print("Connecting to Wi-Fi...");
   
@@ -212,7 +220,7 @@ void TaskUI_Network(void * pvParameters) {
     }
   }
   
-  tft.fillScreen(ST77XX_BLACK); 
+  tft.fillScreen(UI_BG);
 
   unsigned long lastApiTime = 0;
   unsigned long lastPageSwitchTime = millis();
@@ -247,7 +255,7 @@ void TaskUI_Network(void * pvParameters) {
     // 1. Automatic Page Switcher (Every 8s)
     if (millis() - lastPageSwitchTime >= PAGE_AUTO_SWITCH_INTERVAL) {
       currentPage = (currentPage == 0) ? 1 : 0;
-      tft.fillScreen(ST77XX_BLACK);
+      tft.fillScreen(UI_BG);
       lastPageSwitchTime = millis();
     }
 
@@ -281,7 +289,7 @@ void TaskUI_Network(void * pvParameters) {
       drawWarningPage();
     } else {
       if (warningTriggered) {
-        tft.fillScreen(ST77XX_BLACK); 
+        tft.fillScreen(UI_BG);
         warningTriggered = false;
       }
       if (currentPage == 0) drawMealPage();
@@ -289,7 +297,7 @@ void TaskUI_Network(void * pvParameters) {
     }
 
     // 5. Periodic Sync every 60 seconds
-    if (WiFi.status() == WL_CONNECTED && (millis() - lastApiTime > 6000)) {
+    if (WiFi.status() == WL_CONNECTED && (millis() - lastApiTime > 5000)) {
       postSensorsFirebase(cT, cH, cG);
       fetchMealsFirebase();
       lastApiTime = millis();
@@ -326,7 +334,7 @@ String wifiSetupPage(const String& message = "") {
   if (message.length()) page += "<p>" + message + "</p>";
   page += F("<form method='post' action='/save'><label>Wi-Fi name (SSID)</label>"
             "<input name='ssid' maxlength='32' required><label>Password</label>"
-            "<input name='password' type='password' maxlength='63'>"
+            "<input name='password' type='text' maxlength='63'>"
             "<button type='submit'>Save and connect</button></form>"
             "<p>This page closes automatically after Wi-Fi connects.</p></main></body></html>");
   return page;
@@ -389,14 +397,14 @@ void stopWifiSetupPortal() {
 // UI DRAWING FUNCTIONS
 // ==========================================
 void drawWifiStatusIcon() {
-  tft.fillRect(260, 2, 55, 18, ST77XX_BLACK); 
+  tft.fillRect(255, 2, 65, 18, UI_PANEL);
   if (WiFi.status() == WL_CONNECTED && firebaseIdToken != "") {
-    tft.setTextColor(ST77XX_GREEN);
+    tft.setTextColor(UI_OK);
     tft.setTextSize(1);
     tft.setCursor(265, 5);
     tft.print("WIFI OK");
   } else {
-    tft.setTextColor(ST77XX_RED);
+    tft.setTextColor(ST77XX_ORANGE);
     tft.setTextSize(1);
     tft.setCursor(260, 5);
     tft.print("NO AUTH");
@@ -410,40 +418,74 @@ void drawTimeDate() {
     strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
     strftime(dateStr, sizeof(dateStr), "%d/%m/%y", &timeinfo);
 
-    tft.fillRect(0, 0, 255, 20, ST77XX_BLACK); 
-    tft.setTextColor(ST77XX_YELLOW);
+    tft.fillRect(0, 0, 255, 20, UI_PANEL);
+    tft.setTextColor(UI_TEXT);
     tft.setTextSize(2);
     tft.setCursor(10, 5); tft.print(dateStr);
     tft.setCursor(150, 5); tft.print(timeStr);
   } else {
-    tft.fillRect(0, 0, 255, 20, ST77XX_BLACK);
-    tft.setTextColor(ST77XX_YELLOW);
+    tft.fillRect(0, 0, 255, 20, UI_PANEL);
+    tft.setTextColor(UI_WARNING);
     tft.setTextSize(1);
     tft.setCursor(10, 5); tft.print("Time Syncing...");
   }
   drawWifiStatusIcon();
 }
 
+void drawMenuInColumn(const String& menu, int x, int width) {
+  const int charWidth = 12; // Default GFX font at text size 2
+  const int maxChars = width / charWidth;
+  String remaining = menu;
+  remaining.trim();
+  String firstLine;
+
+  if (remaining.length() <= maxChars) {
+    firstLine = remaining;
+    remaining = "";
+  } else {
+    int splitAt = remaining.lastIndexOf(' ', maxChars);
+    if (splitAt <= 0) splitAt = maxChars;
+    firstLine = remaining.substring(0, splitAt);
+    remaining = remaining.substring(splitAt);
+    remaining.trim();
+  }
+
+  String secondLine = remaining;
+  if (secondLine.length() > maxChars) {
+    secondLine = secondLine.substring(0, maxChars - 3) + "...";
+  }
+
+  tft.setTextWrap(false);
+  tft.setCursor(x, 100);
+  tft.print(firstLine);
+  if (secondLine.length()) {
+    tft.setCursor(x, 118);
+    tft.print(secondLine);
+  }
+  tft.setTextWrap(true);
+}
+
 void drawMealPage() {
   drawTimeDate();
   tft.setTextSize(2);
   
-  tft.setTextColor(ST77XX_RED); tft.setCursor(10, 40); tft.print("B.Fast");
+  tft.setTextColor(ST77XX_CYAN); tft.setCursor(10, 40); tft.print("B.Fast");
   tft.setTextColor(ST77XX_GREEN); tft.setCursor(110, 40); tft.print("Lunch");
-  tft.setTextColor(ST77XX_ORANGE); tft.setCursor(210, 40); tft.print("Dinner");
+  tft.setTextColor(ST77XX_YELLOW); tft.setCursor(210, 40); tft.print("Dinner");
 
-  tft.fillRect(0, 70, 320, 20, ST77XX_BLACK);
-  tft.setTextColor(ST77XX_RED); tft.setCursor(10, 70); tft.print(bfastCount);
-  tft.setTextColor(ST77XX_GREEN); tft.setCursor(110, 70); tft.print(lunchCount);
-  tft.setTextColor(ST77XX_ORANGE); tft.setCursor(210, 70); tft.print(dinnerCount);
+  tft.fillRect(0, 70, 320, 20, UI_BG);
+  tft.setTextColor(UI_TEXT); tft.setCursor(10, 70); tft.print(bfastCount);
+  tft.setCursor(110, 70); tft.print(lunchCount);
+  tft.setCursor(210, 70); tft.print(dinnerCount);
 
-  tft.fillRect(0, 100, 320, 40, ST77XX_BLACK);
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_RED); tft.setCursor(10, 100); tft.print(bfastMenu);
-  tft.setTextColor(ST77XX_GREEN); tft.setCursor(110, 100); tft.print(lunchMenu);
-  tft.setTextColor(ST77XX_ORANGE); tft.setCursor(210, 100); tft.print(dinnerMenu);
+  tft.fillRect(0, 98, 320, 42, UI_BG);
+  tft.setTextSize(2);
+  tft.setTextColor(UI_TEXT);
+  drawMenuInColumn(bfastMenu, 5, 95);
+  drawMenuInColumn(lunchMenu, 110, 95);
+  drawMenuInColumn(dinnerMenu, 215, 100);
 
-  tft.fillRect(0, 180, 320, 30, ST77XX_BLACK);
+  tft.fillRect(0, 180, 320, 30, UI_PANEL);
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_CYAN);
   tft.setCursor(70, 180);
@@ -454,17 +496,17 @@ void drawSensorPage(float t, float h, int g) {
   drawTimeDate();
   tft.setTextSize(2);
   
-  tft.setTextColor(ST77XX_RED); tft.setCursor(10, 60); tft.print("Temp");
-  tft.setTextColor(ST77XX_BLUE); tft.setCursor(110, 60); tft.print("Humid");
+  tft.setTextColor(ST77XX_ORANGE); tft.setCursor(10, 60); tft.print("Temp");
+  tft.setTextColor(ST77XX_CYAN); tft.setCursor(110, 60); tft.print("Humid");
   tft.setTextColor(ST77XX_YELLOW); tft.setCursor(210, 60); tft.print("Gas");
 
-  tft.fillRect(0, 90, 320, 20, ST77XX_BLACK);
+  tft.fillRect(0, 90, 320, 20, UI_BG);
   
-  tft.setTextColor(ST77XX_RED); tft.setCursor(10, 90); tft.print(t, 1); tft.print("C");
-  tft.setTextColor(ST77XX_BLUE); tft.setCursor(110, 90); tft.print(h, 1); tft.print("%");
-  tft.setTextColor(ST77XX_YELLOW); tft.setCursor(210, 90); tft.print(g);
+  tft.setTextColor(UI_TEXT); tft.setCursor(10, 90); tft.print(t, 1); tft.print("C");
+  tft.setCursor(110, 90); tft.print(h, 1); tft.print("%");
+  tft.setCursor(210, 90); tft.print(g);
 
-  tft.setTextColor(ST77XX_MAGENTA);
+  tft.setTextColor(UI_ACCENT);
   tft.setCursor(40, 200);
   tft.print("Sponsor: Team Alpha");
 }
@@ -572,7 +614,7 @@ void postCookingFirebase() {
     http.PUT("{\"status\":\"cooking_done\"}");
     http.end();
     
-    tft.fillRect(0, 220, 320, 20, ST77XX_BLACK);
+    tft.fillRect(0, 220, 320, 20, UI_PANEL);
     tft.setCursor(50, 220);
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_GREEN);
