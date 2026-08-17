@@ -1,53 +1,76 @@
-### 📱 ST7789 SPI Display
+# ESP32 Smart Kitchen Wiring
 
-| Display Pin          | ESP32 Pin | Wiring Note          |
-| -------------------- | --------- | -------------------- |
-| **VCC**              | 3.3V      | Do not connect to 5V |
-| **GND**              | GND       |                      |
-| **CS**               | 5         | Chip Select          |
-| **RESET / RES**      | 15        | Reset                |
-| **DC / RS**          | 2         | Data/Command         |
-| **SDA / SDI (MOSI)** | 23        | SPI Data             |
-| **SCL / SCK**        | 18        | SPI Clock            |
-| **BLK / LED**        | 3.3V      | Keeps backlight on   |
+This reference matches the pin definitions in `code/code.ino`.
 
----
+## ST7789 SPI display
 
-### 🔘 Push Buttons
+| Display pin | ESP32 connection | Note |
+| --- | --- | --- |
+| VCC | 3.3 V | Do not connect directly to 5 V unless the module explicitly supports it |
+| GND | GND | Common ground |
+| CS | GPIO 5 | Chip select |
+| RESET / RES | GPIO 15 | Reset |
+| DC / RS | GPIO 2 | Data/command |
+| SDA / SDI / MOSI | GPIO 23 | SPI data |
+| SCL / SCK | GPIO 18 | SPI clock |
+| BLK / LED | 3.3 V | Backlight always on |
 
-| Button           | ESP32 Pin | Wiring Note                                           |
-| ---------------- | --------- | ----------------------------------------------------- |
-| **Cooking Done** | 13        | **Must** use a physical 10k pull-down resistor to GND |
+## Cooking Done button
 
----
+| Button connection | ESP32 connection | Note |
+| --- | --- | --- |
+| One side | GPIO 13 | Configured with the internal pull-up |
+| Other side | GND | Pressing the button produces an active-LOW input |
 
-### 📡 Sensors (Inputs)
+No external pull-down resistor is required.
 
-| Sensor                    | ESP32 Pin | Wiring Note    |
-| ------------------------- | --------- | -------------- |
-| **PIR Motion Sensor**     | 36 (VP)   | Digital Input  |
-| **Flame Sensor**          | 39 (VN)   | Digital Input  |
-| **MQ-2 Gas Sensor**       | 32        | Analog Input   |
-| **DHT11 Temp/Humid**      | 33        | Digital Input  |
-| **Ultrasonic (Tap) TRIG** | 25        | Digital Output |
-| **Ultrasonic (Tap) ECHO** | 26        | Digital Input  |
-| **Ultrasonic (Bin) TRIG** | 27        | Digital Output |
-| **Ultrasonic (Bin) ECHO** | 14        | Digital Input  |
+## Sensors
 
----
+| Sensor | ESP32 connection | Note |
+| --- | --- | --- |
+| PIR motion output | GPIO 36 (VP) | Digital input |
+| Flame sensor output | GPIO 39 (VN) | Digital input; firmware currently treats HIGH as flame detected |
+| MQ-2 analog output | GPIO 32 | Analog input; must not exceed 3.3 V |
+| DHT11 data | GPIO 33 | Digital input |
+| Tap ultrasonic TRIG | GPIO 25 | Digital output |
+| Tap ultrasonic ECHO | GPIO 26 | Digital input; level-shift if the sensor outputs 5 V |
+| Dustbin ultrasonic TRIG | GPIO 27 | Digital output |
+| Dustbin ultrasonic ECHO | GPIO 14 | Digital input; level-shift if the sensor outputs 5 V |
 
-### ⚙️ Actuators (Outputs)
+## Actuators
 
-| Component                  | ESP32 Pin | Wiring Note                                                                  |
-| -------------------------- | --------- | ---------------------------------------------------------------------------- |
-| **Tap motor driver input** | 12        | Connect to a logic-level MOSFET/transistor driver, not directly to the motor |
-| **Fan driver input**       | 4         | Connect to a logic-level MOSFET/transistor driver, not directly to the fan   |
-| **LED Light**              | 16        | Use a resistor if connecting an LED directly                                 |
-| **Buzzer**                 | 17        | Active buzzer                                                                |
-| **Servo 1 (Dustbin)**      | 21        | **Power servos via external 5V source**, not ESP32                           |
-| **Servo 2 (Emergency)**    | 22        | Controls Window & Gas Valve                                                  |
+| Component | ESP32 connection | Note |
+| --- | --- | --- |
+| Tap motor/pump driver input | GPIO 12 | Active-HIGH control signal to a logic-level MOSFET/transistor driver |
+| Fan driver input | GPIO 4 | Active-HIGH control signal to a logic-level MOSFET/transistor driver |
+| LED light | GPIO 16 | Use a current-limiting resistor for a small LED or a driver for a larger light |
+| Active buzzer | GPIO 17 | Use a driver if its current exceeds the GPIO rating |
+| Dustbin servo signal | GPIO 21 | Power the servo from an external supply |
+| Emergency servo signal | GPIO 22 | Power the servo from an external supply |
 
-### ⚠️ Crucial Wiring Reminders:
+## Motor and fan driver wiring
 
-1. **Motor/fan driver:** Remove both relay modules. Each GPIO connects only to the input/gate of a correctly rated logic-level MOSFET or transistor driver. Power the motor and fan from an external supply, add a flyback diode across each inductive load, and connect the external supply GND to ESP32 GND. Never connect a motor or fan directly to an ESP32 pin.
-2. **Button Wiring:** Connect one side of the button to 3.3V. Connect the other side to the ESP32 pin (34 or 35) **AND** to a 10k resistor that goes to GND.
+Remove the relay modules, but do not connect either load directly to an ESP32 GPIO. For each DC motor or fan:
+
+```text
+External supply +  ---- motor/fan ---- MOSFET drain
+ESP32 GPIO ------- gate resistor ---- MOSFET gate
+                                  |
+                            10 kOhm pull-down
+                                  |
+MOSFET source ------------------- GND
+ESP32 GND ----------------------- GND
+External supply GND ------------- GND
+```
+
+Place a flyback diode across each inductive load: cathode/striped end to the positive supply and anode to the MOSFET/load negative side. Select the MOSFET, diode, supply, fuse, and wiring for the load's startup and stall current—not only its normal running current.
+
+GPIO 12 is an ESP32 boot-strapping pin. Ensure its driver circuit does not force an invalid level while the ESP32 starts.
+
+## Safety reminders
+
+- Use an external regulated supply with enough current for the motor, fan, and servos.
+- Join the external supply ground and ESP32 ground.
+- Never apply more than 3.3 V to an ESP32 GPIO.
+- Keep mains voltage away from the breadboard and low-voltage wiring.
+- Test flame and gas behavior using safe simulated inputs before connecting real loads.

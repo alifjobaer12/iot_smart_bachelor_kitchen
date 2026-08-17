@@ -49,7 +49,8 @@ const int GAS_THRESHOLD = 1600;
 const float TEMP_THRESHOLD = 32.0;    
 const int DISTANCE_THRESHOLD = 15;    
 const unsigned long LED_DELAY = 60000;
-const unsigned long PAGE_AUTO_SWITCH_INTERVAL = 10000; // 8 seconds per page
+const unsigned long PAGE_AUTO_SWITCH_INTERVAL = 10000; // 10 seconds per page
+const unsigned long FIREBASE_SYNC_INTERVAL = 5000;
 const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
 const char* WIFI_SETUP_AP_NAME = "SmartKitchen-Setup";
 
@@ -235,6 +236,11 @@ void TaskUI_Network(void * pvParameters) {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
+      if (!previouslyConnected) {
+        configTime(21600, 0, "pool.ntp.org", "time.nist.gov");
+        Serial.print("[WiFi] Connected. IP: ");
+        Serial.println(WiFi.localIP());
+      }
       if (wifiSetupPortalActive) stopWifiSetupPortal();
     } else {
       if (previouslyConnected) {
@@ -252,7 +258,7 @@ void TaskUI_Network(void * pvParameters) {
       loginFirebase();
     }
 
-    // 1. Automatic Page Switcher (Every 8s)
+    // 1. Automatic Page Switcher (Every 10s)
     if (millis() - lastPageSwitchTime >= PAGE_AUTO_SWITCH_INTERVAL) {
       currentPage = (currentPage == 0) ? 1 : 0;
       tft.fillScreen(UI_BG);
@@ -296,8 +302,9 @@ void TaskUI_Network(void * pvParameters) {
       else drawSensorPage(cT, cH, cG);
     }
 
-    // 5. Periodic Sync every 60 seconds
-    if (WiFi.status() == WL_CONNECTED && (millis() - lastApiTime > 5000)) {
+    // 5. Periodic Firebase synchronization
+    if (WiFi.status() == WL_CONNECTED &&
+        millis() - lastApiTime >= FIREBASE_SYNC_INTERVAL) {
       postSensorsFirebase(cT, cH, cG);
       fetchMealsFirebase();
       lastApiTime = millis();
@@ -334,7 +341,7 @@ String wifiSetupPage(const String& message = "") {
   if (message.length()) page += "<p>" + message + "</p>";
   page += F("<form method='post' action='/save'><label>Wi-Fi name (SSID)</label>"
             "<input name='ssid' maxlength='32' required><label>Password</label>"
-            "<input name='password' type='text' maxlength='63'>"
+            "<input name='password' type='password' maxlength='63'>"
             "<button type='submit'>Save and connect</button></form>"
             "<p>This page closes automatically after Wi-Fi connects.</p></main></body></html>");
   return page;

@@ -34,11 +34,13 @@ The firmware reads temperature, humidity, gas, flame, motion, and distance senso
 
 - Authenticates a dedicated ESP32 user with Firebase Email/Password Authentication.
 - Reads meal menus and counts from Firebase Realtime Database.
-- Uploads temperature, humidity, and raw MQ-2 gas readings every minute.
+- Uploads temperature, humidity, and raw MQ-2 gas readings every five seconds.
+- Opens a temporary local Wi-Fi setup portal after a 15-second connection timeout.
 - Uploads emergency state changes to Firebase.
 - Sends a `cooking_done` status when the cooking button is pressed.
 - Refreshes Firebase authentication by signing in again approximately every 50 minutes.
-- Shows meal information or live sensor values on an ST7789 TFT display.
+- Shows meal information or live sensor values using a high-contrast ST7789 interface.
+- Wraps each meal menu within its own display column and truncates excess text with an ellipsis.
 - Fetches time using NTP and displays Bangladesh time (UTC+6).
 - Detects flame and high gas readings as emergency conditions.
 - Activates a buzzer, emergency servo, warning screen, and other safety outputs.
@@ -76,8 +78,7 @@ Local automation does not require Firebase. Cloud reads and writes require both 
 
 - ESP32 development board
 - 2.8-inch ST7789 SPI TFT display, 320 x 240 pixels
-- 2 momentary push buttons
-- 2 x 10 kOhm resistors for button pull-downs
+- 1 momentary push button for the Cooking Done action
 
 ### Sensors
 
@@ -117,12 +118,11 @@ The firmware initializes the display as 240 x 320 and rotates it into landscape 
 
 ### Push buttons
 
-| Function            | ESP32 pin | Required connection                                   |
-| ------------------- | --------- | ----------------------------------------------------- |
-| Change display page | GPIO 34   | Button to 3.3 V and external 10 kOhm pull-down to GND |
-| Cooking completed   | GPIO 35   | Button to 3.3 V and external 10 kOhm pull-down to GND |
+| Function          | ESP32 pin | Required connection                         |
+| ----------------- | --------- | ------------------------------------------- |
+| Cooking completed | GPIO 13   | Button between GPIO 13 and GND (active LOW) |
 
-GPIO 34 and GPIO 35 are input-only pins without internal pull-up or pull-down resistors. External resistors are required to prevent floating readings.
+The firmware enables GPIO 13's internal pull-up resistor, so no external button resistor is required.
 
 ### Sensors
 
@@ -182,7 +182,7 @@ Install the following libraries using Arduino IDE Library Manager.
 | Adafruit Unified Sensor            | Indirect dependency | Common dependency of the DHT library.                   |
 | ESP32Servo                         | `ESP32Servo.h`      | Controls both servo motors.                             |
 
-`WiFi`, `WiFiClientSecure`, `HTTPClient`, `SPI`, `time`, and FreeRTOS support are provided by the ESP32 Arduino core.
+`WiFi`, `WebServer`, `DNSServer`, `Preferences`, `WiFiClientSecure`, `HTTPClient`, `SPI`, `time`, and FreeRTOS support are provided by the ESP32 Arduino core.
 
 ## Firebase setup
 
@@ -302,13 +302,13 @@ These values are defined near the top of [`code/code.ino`](code/code.ino).
 
 | Setting                  | Current value | Effect                                                                    |
 | ------------------------ | ------------: | ------------------------------------------------------------------------- |
-| `GAS_THRESHOLD`          |       `15000` | A higher MQ-2 reading is treated as a gas leak. See the limitation below. |
+| `GAS_THRESHOLD`          |        `1600` | A higher MQ-2 reading is treated as a gas leak. Calibrate for the installed sensor. |
 | `TEMP_THRESHOLD`         |      `32.0 C` | Turns on the exhaust fan at or above this temperature.                    |
 | `DISTANCE_THRESHOLD`     |       `15 cm` | Activates the tap or opens the dustbin below this distance.               |
 | `LED_DELAY`              |    `60000 ms` | Turns the light off after one minute without detected motion.             |
-| Firebase synchronization |    `60000 ms` | Uploads sensor data and downloads meals once per minute.                  |
+| Firebase synchronization |     `5000 ms` | Uploads sensor data and downloads meals every five seconds.               |
 | Authentication interval  |  `3000000 ms` | Signs in again after approximately 50 minutes.                            |
-| Page-button debounce     |      `300 ms` | Prevents repeated page changes from one press.                            |
+| Automatic page interval |    `10000 ms` | Switches between meal and sensor pages every 10 seconds.                  |
 | Cooking-button debounce  |     `1000 ms` | Prevents repeated cooking events from one press.                          |
 
 MQ-2 readings depend on the module, supply voltage, warm-up period, environment, and ADC settings. Calibrate with the actual circuit. A raw ADC reading is not a calibrated gas concentration.
@@ -351,7 +351,7 @@ During a flame or gas emergency, a red `WARNING! FIRE/GAS DETECTED` screen overr
 
 ### Buttons
 
-- Page Toggle switches between the meal page and sensor page.
+- The display automatically switches between the meal and sensor pages every 10 seconds.
 - Cooking Done writes `{"status":"cooking_done"}` to `/kitchen` when Wi-Fi and Firebase authentication are available.
 
 ## Automation rules
@@ -420,7 +420,7 @@ The total is calculated locally as breakfast + lunch + dinner. The JSON document
 
 ### `/sensors`
 
-The ESP32 replaces this object using `PUT` approximately every 60 seconds:
+The ESP32 replaces this object using `PUT` approximately every five seconds:
 
 ```json
 {
@@ -480,8 +480,8 @@ If both fire and gas are active at the transition, the message is `Fire Detected
 | Function              | Method and path                    | Trigger                                               |
 | --------------------- | ---------------------------------- | ----------------------------------------------------- |
 | Firebase login        | `POST accounts:signInWithPassword` | Startup, missing token, or token age above 50 minutes |
-| Fetch meals           | `GET /meal.json?auth=<token>`      | After successful startup login and every 60 seconds   |
-| Upload sensors        | `PUT /sensors.json?auth=<token>`   | Every 60 seconds                                      |
+| Fetch meals           | `GET /meal.json?auth=<token>`      | After successful startup login and every five seconds |
+| Upload sensors        | `PUT /sensors.json?auth=<token>`   | Every five seconds                                    |
 | Upload cooking status | `PUT /kitchen.json?auth=<token>`   | Cooking Done button press                             |
 | Upload warning state  | `PUT /warning.json?auth=<token>`   | Emergency state transition                            |
 
@@ -561,9 +561,9 @@ This label combines two conditions: Wi-Fi disconnection and missing Firebase aut
 - Check the backlight connection.
 - Confirm the Adafruit GFX and ST7789 libraries are installed.
 
-### Buttons change state randomly
+### Cooking button does not respond reliably
 
-- Install external 10 kOhm pull-down resistors on GPIO 34 and GPIO 35.
+- Confirm the button connects GPIO 13 to GND when pressed.
 - Keep button wires short and ensure there is a common ground.
 
 ### Ultrasonic distance always times out
@@ -581,7 +581,7 @@ This label combines two conditions: Wi-Fi disconnection and missing Firebase aut
 
 ### Emergency mode never activates for gas
 
-On a standard ESP32 Arduino configuration, `analogRead()` normally returns values from 0 to 4095, but the current `GAS_THRESHOLD` is 15000. The gas condition therefore cannot normally become true. Calibrate the sensor and correct the firmware threshold before relying on gas detection.
+The configured `GAS_THRESHOLD` of 1600 is a raw ADC threshold, not a calibrated gas concentration. MQ-2 output depends on supply voltage, warm-up time, ADC configuration, and the individual sensor. Calibrate it using the completed circuit before relying on gas detection.
 
 ## Known limitations and security notes
 
@@ -592,7 +592,7 @@ On a standard ESP32 Arduino configuration, `analogRead()` normally returns value
 - Firebase login sends the configured user's email and password from the device. A dedicated least-privilege account is essential.
 - The ID token is stored in RAM as a `String` and appended to database request URLs.
 - The firmware signs in again every 50 minutes instead of using the returned Firebase refresh token.
-- The configured gas threshold of 15000 exceeds the usual 12-bit ESP32 ADC maximum of 4095.
+- The configured gas threshold of 1600 is installation-specific and requires calibration.
 - MQ-2 data is an uncalibrated raw ADC value, not a ppm measurement.
 - JSON deserialization errors are not checked.
 - Database write response codes are ignored, so failed writes are not reported or retried.
