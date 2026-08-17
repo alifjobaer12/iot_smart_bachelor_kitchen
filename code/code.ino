@@ -1,4 +1,7 @@
 #include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -32,8 +35,8 @@
 #define ECHO_BIN  14
 
 // Actuators
-#define RELAY_TAP       12 
-#define RELAY_FAN       4
+#define MOTOR_TAP_PIN   12 // Signal to a logic-level MOSFET motor driver
+#define FAN_PIN         4  // Signal to a logic-level MOSFET fan driver
 #define LED_PIN         16
 #define BUZZER_PIN      17
 #define SERVO_BIN_PIN   21
@@ -47,6 +50,8 @@ const float TEMP_THRESHOLD = 32.0;
 const int DISTANCE_THRESHOLD = 15;    
 const unsigned long LED_DELAY = 60000;
 const unsigned long PAGE_AUTO_SWITCH_INTERVAL = 10000; // 8 seconds per page
+const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
+const char* WIFI_SETUP_AP_NAME = "SmartKitchen-Setup";
 
 // ==========================================
 // OBJECTS & THREADING
@@ -58,6 +63,14 @@ Servo servoEmergency;
 
 TaskHandle_t TaskUI;
 SemaphoreHandle_t dataMutex;
+WebServer wifiSetupServer(80);
+DNSServer wifiSetupDns;
+Preferences wifiPreferences;
+bool wifiSetupPortalActive = false;
+bool wifiSetupRoutesConfigured = false;
+unsigned long wifiAttemptStarted = 0;
+String activeWifiSsid;
+String activeWifiPassword;
 
 // ==========================================
 // AUTH & SHARED VARIABLES
@@ -148,7 +161,7 @@ void loop() {
   }
 
   bool handDetected = (distTap < DISTANCE_THRESHOLD);
-  digitalWrite(RELAY_TAP, (handDetected || fire) ? HIGH : LOW);
+  digitalWrite(MOTOR_TAP_PIN, (handDetected || fire) ? HIGH : LOW);
   servoBin.write((distBin < DISTANCE_THRESHOLD) ? 90 : 0);
 
   if (digitalRead(PIR_PIN) == HIGH) {
@@ -166,7 +179,7 @@ void loop() {
     servoEmergency.write(0);
   }
 
-  digitalWrite(RELAY_FAN, (isHot || gasLeak) ? HIGH : LOW);
+  digitalWrite(FAN_PIN, (isHot || gasLeak) ? HIGH : LOW);
   delay(100); 
 }
 
@@ -183,15 +196,16 @@ void TaskUI_Network(void * pvParameters) {
   tft.setTextSize(2);
   tft.print("Connecting to Wi-Fi...");
   
-  WiFi.begin(ssid, password);
+  loadWifiCredentials();
+  beginWifiConnection();
 
-  int connTimeout = 0;
-  while (WiFi.status() != WL_CONNECTED && connTimeout < 20) {
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-    connTimeout++;
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - wifiAttemptStarted < WIFI_CONNECT_TIMEOUT) {
+    vTaskDelay(250 / portTICK_PERIOD_MS);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    stopWifiSetupPortal();
     configTime(21600, 0, "pool.ntp.org", "time.nist.gov"); 
     if (loginFirebase()) {
       fetchMealsFirebase();
@@ -202,11 +216,31 @@ void TaskUI_Network(void * pvParameters) {
 
   unsigned long lastApiTime = 0;
   unsigned long lastPageSwitchTime = millis();
+  bool previouslyConnected = (WiFi.status() == WL_CONNECTED);
+
+  if (WiFi.status() != WL_CONNECTED) startWifiSetupPortal();
 
   for(;;) { 
-    if (WiFi.status() != WL_CONNECTED) {
-      WiFi.begin(ssid, password);
-    } else if (firebaseIdToken == "" || (millis() - tokenAuthTime > 3000000)) {
+    if (wifiSetupPortalActive) {
+      wifiSetupDns.processNextRequest();
+      wifiSetupServer.handleClient();
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      if (wifiSetupPortalActive) stopWifiSetupPortal();
+    } else {
+      if (previouslyConnected) {
+        wifiAttemptStarted = millis();
+        WiFi.begin(activeWifiSsid.c_str(), activeWifiPassword.c_str());
+      }
+      if (!wifiSetupPortalActive && millis() - wifiAttemptStarted >= WIFI_CONNECT_TIMEOUT) {
+        startWifiSetupPortal();
+      }
+    }
+    previouslyConnected = (WiFi.status() == WL_CONNECTED);
+
+    if (WiFi.status() == WL_CONNECTED &&
+        (firebaseIdToken == "" || (millis() - tokenAuthTime > 3000000))) {
       loginFirebase();
     }
 
@@ -263,6 +297,92 @@ void TaskUI_Network(void * pvParameters) {
 
     vTaskDelay(20 / portTICK_PERIOD_MS); 
   }
+}
+
+// ==========================================
+// TEMPORARY WI-FI SETUP PORTAL
+// ==========================================
+void loadWifiCredentials() {
+  wifiPreferences.begin("wifi", true);
+  activeWifiSsid = wifiPreferences.getString("ssid", ssid);
+  activeWifiPassword = wifiPreferences.getString("password", password);
+  wifiPreferences.end();
+}
+
+void beginWifiConnection() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(activeWifiSsid.c_str(), activeWifiPassword.c_str());
+  wifiAttemptStarted = millis();
+  Serial.printf("[WiFi] Connecting to %s...\n", activeWifiSsid.c_str());
+}
+
+String wifiSetupPage(const String& message = "") {
+  String page = F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                  "<title>Smart Kitchen Wi-Fi</title><style>body{font-family:sans-serif;max-width:420px;"
+                  "margin:40px auto;padding:20px;background:#f4f6f8}main{background:white;padding:24px;"
+                  "border-radius:12px;box-shadow:0 2px 12px #bbb}input,button{box-sizing:border-box;width:100%;"
+                  "padding:12px;margin:8px 0}button{background:#087f5b;color:white;border:0;border-radius:6px}"
+                  "</style></head><body><main><h2>Smart Kitchen Wi-Fi Setup</h2>");
+  if (message.length()) page += "<p>" + message + "</p>";
+  page += F("<form method='post' action='/save'><label>Wi-Fi name (SSID)</label>"
+            "<input name='ssid' maxlength='32' required><label>Password</label>"
+            "<input name='password' type='password' maxlength='63'>"
+            "<button type='submit'>Save and connect</button></form>"
+            "<p>This page closes automatically after Wi-Fi connects.</p></main></body></html>");
+  return page;
+}
+
+void startWifiSetupPortal() {
+  if (wifiSetupPortalActive) return;
+
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(WIFI_SETUP_AP_NAME);
+  wifiSetupDns.start(53, "*", WiFi.softAPIP());
+
+  if (!wifiSetupRoutesConfigured) {
+    wifiSetupServer.on("/", HTTP_GET, []() {
+      wifiSetupServer.send(200, "text/html", wifiSetupPage());
+    });
+    wifiSetupServer.on("/save", HTTP_POST, []() {
+      String newSsid = wifiSetupServer.arg("ssid");
+      String newPassword = wifiSetupServer.arg("password");
+      newSsid.trim();
+      if (newSsid.length() == 0) {
+        wifiSetupServer.send(400, "text/html", wifiSetupPage("Wi-Fi name is required."));
+        return;
+      }
+
+      wifiPreferences.begin("wifi", false);
+      wifiPreferences.putString("ssid", newSsid);
+      wifiPreferences.putString("password", newPassword);
+      wifiPreferences.end();
+      activeWifiSsid = newSsid;
+      activeWifiPassword = newPassword;
+
+      wifiSetupServer.send(200, "text/html", wifiSetupPage("Saved. Connecting now..."));
+      delay(150);
+      stopWifiSetupPortal();
+      beginWifiConnection();
+    });
+    wifiSetupServer.onNotFound([]() {
+      wifiSetupServer.sendHeader("Location", "http://192.168.4.1/", true);
+      wifiSetupServer.send(302, "text/plain", "");
+    });
+    wifiSetupRoutesConfigured = true;
+  }
+  wifiSetupServer.begin();
+  wifiSetupPortalActive = true;
+  Serial.println("[WiFi] Setup portal: connect to SmartKitchen-Setup and open http://192.168.4.1");
+}
+
+void stopWifiSetupPortal() {
+  if (!wifiSetupPortalActive) return;
+  wifiSetupDns.stop();
+  wifiSetupServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  wifiSetupPortalActive = false;
+  Serial.println("[WiFi] Setup portal stopped.");
 }
 
 // ==========================================
@@ -493,8 +613,8 @@ void initHardware() {
   pinMode(BTN_COOK, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BTN_COOK), isrCookButton, FALLING);
 
-  pinMode(RELAY_TAP, OUTPUT);
-  pinMode(RELAY_FAN, OUTPUT);
+  pinMode(MOTOR_TAP_PIN, OUTPUT);
+  pinMode(FAN_PIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
@@ -509,8 +629,8 @@ void initHardware() {
   servoEmergency.setPeriodHertz(50);
   servoEmergency.attach(SERVO_EMERG_PIN, 500, 2400);
   
-  digitalWrite(RELAY_TAP, LOW);
-  digitalWrite(RELAY_FAN, LOW);
+  digitalWrite(MOTOR_TAP_PIN, LOW);
+  digitalWrite(FAN_PIN, LOW);
   digitalWrite(LED_PIN, LOW);
   digitalWrite(BUZZER_PIN, LOW);
   
